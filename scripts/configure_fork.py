@@ -18,7 +18,7 @@ def main() -> None:
         parser.error('Invalid GitHub username')
     manifest = BASE/'custom_components/haier_smartair2/manifest.json'
     m = json.loads(manifest.read_text(encoding='utf-8'))
-    repo = f'https://github.com/{user}/haier-smartair2-cloud-for-homeassistant'
+    repo = f'https://github.com/{user}/haier-smartair2-cloud-for-homeassistant-leroy-machine'
     m.update(documentation=repo, issue_tracker=f'{repo}/issues', codeowners=[f'@{user}'])
     manifest.write_text(json.dumps(m, indent=2)+'\n',encoding='utf-8')
     readme = BASE/'README.md'

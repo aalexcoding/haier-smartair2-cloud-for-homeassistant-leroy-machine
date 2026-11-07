@@ -27,7 +27,7 @@ The V3 switch entities are created for every cloud V3 device, **but remain unava
 1. Fork the [upstream repository](https://github.com/bwitosze/haier-smartair2-cloud-for-homeassistant/fork) on GitHub, keeping its history and **LICENSE**.
 2. Apply this overlay to the **root** of your fork and run `python scripts/configure_fork.py --github-user YOUR_USERNAME`.
 3. Commit and push, create a pre-release when tested. Until then use your default branch.
-4. In HACS → three-dot menu → **Custom repositories**, paste `https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant`, category **Integration**.
+4. In HACS → three-dot menu → **Custom repositories**, paste `https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine`, category **Integration**.
 5. Install, restart Home Assistant, then add **Haier SmartAir2** under Settings → Devices & Services. Log in using your SmartAir2 account and select the region.
 6. All devices returned by the account are discovered automatically. For local plaintext modules, optionally configure the `MAC:IP` mapping in Options.
 

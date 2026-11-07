@@ -10,7 +10,7 @@ Este repositorio extiende [la integración original de bwitosze](https://github.
 2. Copia el contenido del ZIP de ampliación a la raíz de tu fork (conservando `.git/` y `LICENSE`).
 3. Ejecuta `python scripts/configure_fork.py --github-user TU_USUARIO`.
 4. Haz commit/push y crea una versión de prueba cuando termines las comprobaciones.
-5. En Home Assistant → HACS → repositorios personalizados, añade `https://github.com/TU_USUARIO/haier-smartair2-cloud-for-homeassistant`, tipo **Integration**.
+5. En Home Assistant → HACS → repositorios personalizados, añade `https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine`, tipo **Integration**.
 6. Instala, reinicia Home Assistant, añade la integración Haier SmartAir2 y accede con tu cuenta de la aplicación SmartAir2.
 
 La integración descubre los dispositivos de la cuenta automáticamente. Para cada V3 cloud crea controles independientes de oscilación vertical, horizontal y Purificar; solo están disponibles cuando el equipo comunica los atributos correspondientes.
