@@ -120,8 +120,16 @@ class HaierCoordinator(DataUpdateCoordinator[HaierState]):
         state = self._decode_latest()
         if state is not None:
             self.async_set_updated_data(state)
+        elif self.is_v3_cloud:
+            # boundDevs supplies reachability even before Push/Dev/Attr.
+            # Notify HA so it can show an online device with unknown HVAC state.
+            self.async_set_updated_data(self.data or HaierState())
 
     async def _async_update_data(self) -> HaierState:
+        if self.is_v3_cloud:
+            # V3 Cloud does not answer the legacy EPP status poll. Returning
+            # unknown state is preferable to sending useless queries.
+            return self._decode_latest() or self.data or HaierState()
         await self.transport.async_poll(self.devid)
         # give the device up to ~2s to answer; the push callback may also fire
         for _ in range(10):

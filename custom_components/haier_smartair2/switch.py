@@ -46,7 +46,13 @@ class HaierExtraSwitch(CoordinatorEntity[HaierCoordinator], SwitchEntity):
 
     @property
     def available(self) -> bool:
-        if not super().available or self.coordinator.data is None:
+        if not super().available:
+            return False
+        if self.coordinator.is_v3_cloud:
+            # An absent state snapshot is unknown, not a disconnected device.
+            # A write still requires the complete snapshot in grSetDAC.
+            return self.coordinator.transport.is_online(self.coordinator.devid)
+        if self.coordinator.data is None:
             return False
         attrs = self._attrs()
         if self._kind == "swing_vertical":

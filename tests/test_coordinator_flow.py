@@ -170,3 +170,33 @@ async def test_cloud_v2_refuses_missing_epp_read(monkeypatch):
     with pytest.raises(RuntimeError, match='no valid EPP status'):
         await coord.async_apply(power=True)
     assert t.commands == []
+
+@pytest.mark.asyncio
+async def test_v3_online_without_attrs_reports_unknown_and_skips_epp(monkeypatch):
+    mod, FakeV3, _ = load_coordinator(monkeypatch)
+
+    class UninitializedCloud(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.attrs = {}
+
+        async def async_poll(self, devid):
+            raise AssertionError('V3 cloud must not send legacy EPP polls')
+
+    transport = UninitializedCloud()
+    coord = mod.HaierCoordinator(None, transport, FakeV3(), 'A' * 16, 'Unknown', True)
+    coord._on_push()
+    assert coord.data is not None
+    assert coord.data.power is None
+    state = await coord._async_update_data()
+    assert state.power is None
+
+
+@pytest.mark.asyncio
+async def test_v3_power_command_is_allowed_without_initial_snapshot(monkeypatch):
+    mod, FakeV3, _ = load_coordinator(monkeypatch)
+    transport = FakeTransport()
+    transport.attrs = {}
+    coord = mod.HaierCoordinator(None, transport, FakeV3(), 'A' * 16, 'Unknown', True)
+    await coord.async_apply(power=False)
+    assert transport.commands == [('A' * 16, 'power', False)]

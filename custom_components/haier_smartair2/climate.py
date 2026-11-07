@@ -114,6 +114,13 @@ class HaierClimate(CoordinatorEntity[HaierCoordinator], ClimateEntity):
 
     @property
     def available(self) -> bool:
+        # Cloud V3 reachability and known climate state are different things.
+        # A powered but unqueried unit may be online with no cached attributes.
+        if self.coordinator.is_v3_cloud:
+            return (
+                super().available
+                and self.coordinator.transport.is_online(self.coordinator.devid)
+            )
         return (
             super().available
             and self.coordinator.data is not None
@@ -131,11 +138,12 @@ class HaierClimate(CoordinatorEntity[HaierCoordinator], ClimateEntity):
     @property
     def hvac_mode(self) -> HVACMode | None:
         st = self.coordinator.data
-        if st is None:
+        if st is None or st.power is None:
+            # Do not fabricate AUTO when the cloud has not reported power yet.
             return None
         if st.power is False:
             return HVACMode.OFF
-        return MODE_TO_HVAC.get(st.mode, HVACMode.AUTO)
+        return MODE_TO_HVAC.get(st.mode)
 
     @property
     def fan_mode(self) -> str | None:
