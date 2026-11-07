@@ -1,12 +1,16 @@
 {
   "domain": "haier_smartair2",
   "name": "Haier SmartAir2",
-  "version": "0.1.4",
-  "codeowners": ["@bwitosze"],
+  "version": "0.2.0-beta.1",
+  "codeowners": [
+    "@aalexcoding"
+  ],
   "config_flow": true,
-  "documentation": "https://github.com/bwitosze/haier-smartair2-cloud-for-homeassistant",
-  "issue_tracker": "https://github.com/bwitosze/haier-smartair2-cloud-for-homeassistant/issues",
+  "documentation": "https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant",
+  "issue_tracker": "https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant/issues",
   "integration_type": "hub",
   "iot_class": "cloud_push",
-  "requirements": []
+  "requirements": [
+    "paho-mqtt==2.1.0"
+  ]
 }

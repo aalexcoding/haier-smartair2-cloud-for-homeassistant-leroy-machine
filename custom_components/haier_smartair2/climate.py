@@ -93,10 +93,11 @@ class HaierClimate(CoordinatorEntity[HaierCoordinator], ClimateEntity):
             model="SmartAir2 (cloud)" if coordinator.via_cloud else "SmartAir2 (local)",
         )
         # fan selector only when the codec reliably supports fan control
-        # (V2: auto/quiet/low/medium/high/turbo; V3: same minus turbo, which this
-        # generation does not expose)
+        # V3 cloud supports auto/low/medium/high; quiet/turbo are unverified.
         if coordinator.codec.supports_fan:
             extras = coordinator.codec.extra_fan_modes
+            if coordinator.via_cloud and coordinator.is_v3_cloud:
+                extras = tuple(x for x in extras if x != "quiet")
             modes = ["auto"]
             if "quiet" in extras:
                 modes.append("quiet")
@@ -105,17 +106,19 @@ class HaierClimate(CoordinatorEntity[HaierCoordinator], ClimateEntity):
                 modes.append("turbo")
             self._attr_fan_modes = modes
             self._attr_supported_features |= ClimateEntityFeature.FAN_MODE
-        # Swing selector only on generations where the louvre bits are known.
-        # V2 (salon) has them straight from Haier's device profile; V3 (maks) was
-        # never calibrated — and that unit's louvre is mechanically damaged, so it
-        # must stay unexposed rather than merely untested.
+        # Keep native swing only for codecs which support it. V3 cloud has
+        # separate vertical/horizontal switches calibrated via MQTT attributes.
         if coordinator.codec.supports_swing:
             self._attr_swing_modes = SWING_BOOL
             self._attr_supported_features |= ClimateEntityFeature.SWING_MODE
 
     @property
     def available(self) -> bool:
-        return super().available and self.coordinator.data is not None
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.coordinator.data.power is not None
+        )
 
     @property
     def current_temperature(self) -> float | None:
