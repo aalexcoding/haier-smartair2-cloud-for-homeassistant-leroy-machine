@@ -2,11 +2,16 @@
 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Custom%20Integration-41BDF5?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom%20Repository-41BDF5)](https://hacs.xyz/)
+[![HACS validation](https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/actions/workflows/hacs.yaml/badge.svg)](https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/actions/workflows/hacs.yaml)
+[![hassfest](https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/actions/workflows/hassfest.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **An unofficial community fork of [bwitosze/haier-smartair2-cloud-for-homeassistant](https://github.com/bwitosze/haier-smartair2-cloud-for-homeassistant), maintained by [Alejandro Delgado (@aalexcoding)](https://github.com/aalexcoding).**
 
 This fork extends the original Home Assistant integration with **Haier SmartAir2 V3 cloud control**, including certain air conditioners equipped with **MK-QTWIFI08 Wi-Fi modules**. The original V2 cloud (EPP over MQTT) and local TCP implementations are retained.
+
+> [!IMPORTANT]
+> **Unofficial community integration.** This project is not affiliated with, endorsed by or supported by Haier. It relies on undocumented vendor cloud interfaces that may change at any time.
 
 **This is for the legacy SmartAir2 app, not Haier hOn.** No Android bridge or vendor SDK is required at runtime. Cloud devices require an active SmartAir2 account and internet connectivity.
 
@@ -48,29 +53,54 @@ The integration chooses a transport per device based on the existing configurati
 
 The extra switches are separate Home Assistant entities; they do **not** automatically appear inside the default thermostat popup. Add them to an Entities card if desired.
 
+## Requirements
+
+- Home Assistant **2025.1.0** or newer (local brand icons are shown from Home Assistant 2026.3).
+- [HACS](https://hacs.xyz/) / the Home Assistant Marketplace, for the recommended installation method.
+- An account for the **legacy SmartAir2 app** (not hOn) with your air conditioners already paired in that app.
+- Internet access from Home Assistant to the Haier cloud (cloud transports). The local transport needs a compatible module reachable on TCP `56800`.
+- Python dependency `paho-mqtt==2.1.0`, installed automatically by Home Assistant.
+
 ## Installation
 
-### HACS (recommended)
+### Marketplace / HACS (recommended)
 
-1. Open **HACS → Custom repositories** in Home Assistant.
-2. Add this repository as category **Integration**:
+[![Open your Home Assistant instance and open this repository in the Marketplace.](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=aalexcoding&repository=haier-smartair2-cloud-for-homeassistant-leroy-machine&category=integration)
 
-   ```text
-   https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine
-   ```
+1. Click the button above, or open the **Marketplace** (HACS) in Home Assistant and search for **Haier SmartAir2 (V3 cloud support)**.
+   - The button uses the `marketplace_repository` My Home Assistant redirect introduced in Home Assistant 2026.11; older installations are redirected to HACS.
+   - Until this repository is accepted into the default HACS catalog, add it first as a **custom repository** (three-dot menu → **Custom repositories**) with type **Integration**:
 
-3. Find **Haier SmartAir2 (V3 cloud support)** and download it.
-4. Restart Home Assistant.
-5. Go to **Settings → Devices & services → Add integration → Haier SmartAir2**.
-6. Enter your **SmartAir2 account** credentials and select the region. Your associated devices will be discovered.
+     ```text
+     https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine
+     ```
+
+2. Download the integration.
+3. Restart Home Assistant.
+4. Continue with [Configuration](#configuration).
 
 > **Already using the upstream integration?** Both projects use the same domain, `haier_smartair2`. Do **not** install both codebases simultaneously. Back up your Home Assistant configuration, replace the installed integration code via HACS, and restart. Do not delete your integration entry or entities unless you intentionally want to reconfigure them.
 
 ### Manual installation
 
-Copy `custom_components/haier_smartair2/` from this repository to your Home Assistant `<config>/custom_components/` directory, then restart Home Assistant. Use only one copy of this integration domain.
+1. Download the latest [release](https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/releases) (or clone this repository).
+2. Copy `custom_components/haier_smartair2/` into your Home Assistant `<config>/custom_components/` directory, so that `<config>/custom_components/haier_smartair2/manifest.json` exists.
+3. Restart Home Assistant.
+
+Use only one copy of this integration domain.
+
+### Updating
+
+- **HACS / Marketplace:** when a new release is published, Home Assistant shows an update for this integration. Install it and restart Home Assistant.
+- **Manual:** replace the whole `custom_components/haier_smartair2/` directory with the one from the new release and restart.
+- Read the [CHANGELOG](CHANGELOG.md) before updating. Updates keep your existing config entry and entities; you do not need to remove and re-add the integration.
 
 ## Configuration
+
+[![Open your Home Assistant instance and start setting up Haier SmartAir2.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=haier_smartair2)
+
+1. Go to **Settings → Devices & services → Add integration → Haier SmartAir2 (V3 cloud support)** (or use the button above).
+2. Enter your **SmartAir2 account** credentials and select the region. Your associated devices will be discovered.
 
 The configuration flow supports:
 
@@ -103,9 +133,13 @@ A V3 cloud device reported online by Haier can be shown as available with an **u
 - **Beta compatibility:** MK-QTWIFI08 is the principal tested V3 cloud family. Please do not assume support for all V3 units or every optional capability.
 - **Cloud dependency:** V3 cloud requires the vendor service; protocol/server changes can affect functionality.
 - **Initial attributes:** after restart, some values can remain unknown until Haier emits an attribute push.
-- **Legacy TLS behavior:** parts of the inherited cloud handshake disable certificate verification. This is a known security limitation under review; do not treat this as a security-hardened integration.
+- **TLS:** all cloud connections (REST login, gateway discovery and MQTT) verify the server certificate and hostname. This was verified against the European cloud; if the `us` or `sg` gateways present an invalid certificate, connecting fails with a TLS error instead of silently continuing. Please report it if that happens. The **local** transport (TCP `56800`) is plaintext by design of the device protocol.
 - **No hOn support:** this project targets older SmartAir2 accounts, not the newer hOn ecosystem or the mainland China cloud API.
 - **V2/local regression coverage:** these paths are retained but have not been fully revalidated on a broad hardware selection.
+
+## Reporting issues
+
+Please report bugs and device compatibility results at **[GitHub Issues](https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/issues)**.
 
 ## Development and contributions
 

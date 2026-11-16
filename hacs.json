@@ -1,5 +1,4 @@
 {
   "name": "Haier SmartAir2 (V3 cloud support)",
-  "render_readme": true,
   "homeassistant": "2025.1.0"
 }

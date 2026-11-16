@@ -30,6 +30,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util.ssl import get_default_context
 
 from .v3_cloud import attrs_match, make_grsetdac_args, normalized, same_attr
 
@@ -49,13 +50,14 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-def _insecure_ctx() -> ssl.SSLContext:
-    # bare context: create_default_context() loads the CA store from disk, which is a
-    # blocking call in the event loop - and verification is disabled here anyway
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+def _tls_ctx() -> ssl.SSLContext:
+    """Verified TLS context (CA chain + hostname) for the gateway and MQTT broker.
+
+    Home Assistant's shared client context is preloaded with the certifi CA store,
+    so it does not block the event loop. The Haier REST, master-gw and MQTT
+    endpoints present publicly trusted certificates for their hostnames.
+    """
+    return get_default_context()
 
 
 def _make_auth() -> tuple[str, str]:
@@ -167,7 +169,7 @@ class HaierCloudClient:
             "Accept": "application/json",
         }
         url = f"https://{LOGIN_HOST}:{LOGIN_PORT}/uhome/acbiz/login"
-        async with session.post(url, data=json.dumps(body), headers=headers, ssl=False) as resp:
+        async with session.post(url, data=json.dumps(body), headers=headers) as resp:
             data = await resp.json(content_type=None)
         _LOGGER.debug("Haier login returned retCode=%s", data.get("retCode"))
         if data.get("retCode") != "00000" or not data.get("accessToken"):
@@ -191,7 +193,7 @@ class HaierCloudClient:
         }
         body = {"get_devlist_info": {"sctx": {"appId": APP_ID, "appVersion": APP_VERSION, "clientId": REST_CLIENT_ID}}}
         url = f"https://{LOGIN_HOST}:{LOGIN_PORT}/uhome/acbiz/device/v25/get_userDevlist"
-        async with session.post(url, data=json.dumps(body), headers=headers, ssl=False) as resp:
+        async with session.post(url, data=json.dumps(body), headers=headers) as resp:
             data = await resp.json(content_type=None)
         out: list[dict] = []
         for city in data.get("cityListResult") or []:
@@ -233,7 +235,7 @@ class HaierCloudClient:
         struct.pack_into(">H", hdr, 2, 1)
         struct.pack_into(">H", hdr, 6, len(j))
         with socket.create_connection((self._gateway, MASTER_GW_PORT), timeout=8) as s:
-            with _insecure_ctx().wrap_socket(s, server_hostname=self._gateway) as ss:
+            with _tls_ctx().wrap_socket(s, server_hostname=self._gateway) as ss:
                 ss.sendall(bytes(hdr) + j)
                 data = b""
                 while len(data) < 8:
@@ -274,7 +276,7 @@ class HaierCloudClient:
                 protocol=mqtt.MQTTv31,
             )
             client.username_pw_set(username, password)
-            client.tls_set_context(_insecure_ctx())
+            client.tls_set_context(_tls_ctx())
             client.on_connect = self._on_connect
             client.on_message = self._on_message
             client.on_disconnect = self._on_disconnect
