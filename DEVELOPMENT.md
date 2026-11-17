@@ -24,4 +24,4 @@ git commit -m 'Add Haier SmartAir2 cloud V3 control and multi-device support'
 git push -u origin feature/v3-cloud
 ```
 
-**Do not publish a personal HA `/config` directory, `config/.storage`, credentials, access tokens, or backup files.** Public CI only tests the pure protocol module; runtime Home Assistant integration tests still need a Home Assistant test environment.
+**Do not publish a personal HA `/config` directory, `config/.storage`, credentials, access tokens, or backup files.** Public CI tests the protocol module and coordinator/authentication lifecycle using lightweight Home Assistant stubs. Full runtime integration tests still need a Home Assistant test environment.

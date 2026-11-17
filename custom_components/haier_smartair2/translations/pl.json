@@ -10,6 +10,13 @@
           "region": "Region",
           "local_ips": "Urządzenia lokalne (MAC:IP, opcjonalnie)"
         }
+      },
+      "reauth_confirm": {
+        "title": "Ponowne uwierzytelnienie Haier SmartAir2",
+        "description": "Uwierzytelnianie konta {username} nie powiodło się. Wprowadź aktualne hasło SmartAir2 (Haier).",
+        "data": {
+          "password": "Hasło"
+        }
       }
     },
     "error": {
@@ -17,7 +24,8 @@
       "cannot_connect": "Nie można połączyć z chmurą Haier"
     },
     "abort": {
-      "already_configured": "To konto jest już skonfigurowane"
+      "already_configured": "To konto jest już skonfigurowane",
+      "reauth_successful": "Ponowne uwierzytelnienie zakończone pomyślnie"
     }
   },
   "selector": {

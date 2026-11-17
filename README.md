@@ -110,6 +110,8 @@ The configuration flow supports:
 
 You can change region and local mappings later in the integration options. Changing the transport may affect entity IDs, so review dashboards and automations afterward.
 
+If Haier rejects your password, the integration stops automatic login attempts. Open **Settings → Devices & services** and follow the reauthentication prompt to enter your current SmartAir2 password. Your devices and settings are preserved. Temporary connection failures retry with increasing delays, up to five minutes.
+
 ## How V3 cloud control works
 
 The V3 cloud implementation builds on the original SmartAir2 authentication and MQTT connection:

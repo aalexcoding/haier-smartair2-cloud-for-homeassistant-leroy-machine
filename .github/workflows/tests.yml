@@ -1,4 +1,4 @@
-name: Python protocol checks
+name: Python integration checks
 on:
   push:
     branches: [main, 'feature/**']
@@ -15,5 +15,5 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Check source compiles
         run: python -m compileall -q custom_components/haier_smartair2
-      - name: Pure protocol tests
+      - name: Protocol and authentication lifecycle tests
         run: python -m pytest -q

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from .cloud import CloudAuthError, HaierCloudClient
 from .codec import codec_for_type
@@ -55,11 +55,6 @@ def _parse_local_map(raw: str | None) -> dict[str, str]:
     return out
 
 
-async def _async_update_listener(hass: HomeAssistant, entry: HaierConfigEntry) -> None:
-    """Reload the entry when options change (region / local mapping)."""
-    await hass.config_entries.async_reload(entry.entry_id)
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: HaierConfigEntry) -> bool:
     """Set up Haier SmartAir2 from a config entry."""
     conf = {**entry.data, **entry.options}  # options override initial data
@@ -76,12 +71,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaierConfigEntry) -> boo
         )
 
     cloud = HaierCloudClient(
-        hass, entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD], gateway, client_id
+        hass,
+        entry.data[CONF_USERNAME],
+        entry.data[CONF_PASSWORD],
+        gateway,
+        client_id,
+        on_auth_failed=lambda: entry.async_start_reauth(hass),
     )
     try:
         devices = await cloud.async_get_devices()
     except CloudAuthError as err:
-        raise ConfigEntryNotReady(f"Haier login failed: {err}") from err
+        raise ConfigEntryAuthFailed("Haier login failed") from err
     except Exception as err:  # noqa: BLE001
         raise ConfigEntryNotReady(f"Haier device list failed: {err}") from err
 
@@ -120,7 +120,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaierConfigEntry) -> boo
     if any_cloud:
         try:
             await cloud.async_start()
+        except CloudAuthError as err:
+            await cloud.async_stop()
+            for local in data.local_clients:
+                await local.async_stop()
+            raise ConfigEntryAuthFailed("Haier login failed") from err
         except Exception as err:  # noqa: BLE001
+            await cloud.async_stop()
+            for local in data.local_clients:
+                await local.async_stop()
             raise ConfigEntryNotReady(f"Haier cloud connect failed: {err}") from err
 
     # first refresh (best-effort; entities go unavailable if a device is silent)
@@ -128,7 +136,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaierConfigEntry) -> boo
         await coord.async_config_entry_first_refresh()
 
     entry.runtime_data = data
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

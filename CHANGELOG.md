@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Stop automatic cloud login attempts after an authentication failure and start Home Assistant reauthentication. Setup authentication failures now raise `ConfigEntryAuthFailed`.
+- Add a password confirmation flow that validates the replacement password, preserves the existing account and configuration, and reloads the entry. Add English and Polish prompts.
+- Retry connection failures with exponential backoff (30, 60, 120, 240, then 300 seconds), reset after success, and cancel pending retries and token refreshes on authentication failure or unload.
+- Reload options explicitly to avoid duplicate reloads during reauthentication while retaining Home Assistant 2025.1 compatibility.
+- Add regression tests for authentication failures, reauthentication, reconnect backoff and shutdown.
+
 ## 0.2.1
 
 - **Security:** enable TLS certificate and hostname verification for the Haier REST login/device list, gateway discovery (master-gw) and MQTT broker connections, using Home Assistant's shared verified SSL context. Previously verification was disabled (`ssl=False` / `CERT_NONE`). Verified against the European cloud endpoints.

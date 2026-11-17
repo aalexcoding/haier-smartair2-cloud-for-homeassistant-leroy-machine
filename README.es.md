@@ -76,6 +76,8 @@ Detalles en [COMPATIBILITY.md](COMPATIBILITY.md). No se garantiza que todos los 
 
 Puedes cambiar la región y las asociaciones locales en las opciones de la integración. Cambiar de transporte puede afectar a los identificadores de entidad.
 
+Si Haier rechaza la contraseña, la integración detiene los intentos automáticos de inicio de sesión. Abre **Ajustes → Dispositivos y servicios** y sigue el aviso de reautenticación para introducir tu contraseña actual de SmartAir2. Se conservan los dispositivos y los ajustes. Los fallos temporales de conexión se reintentan con intervalos crecientes, hasta cinco minutos.
+
 ## Limitaciones conocidas
 
 - **Estado inicial:** después de reiniciar puede faltar el estado inicial MQTT. Los cambios de modo/temperatura/velocidad se bloquean hasta recibir un conjunto completo de atributos; el encendido utiliza un comando individual. No se inventan valores de los atributos restantes.

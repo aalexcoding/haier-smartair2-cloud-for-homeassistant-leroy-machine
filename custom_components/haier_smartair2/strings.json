@@ -10,6 +10,13 @@
           "region": "Region",
           "local_ips": "Local devices (MAC:IP, optional)"
         }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Haier SmartAir2",
+        "description": "Authentication failed for {username}. Enter your current SmartAir2 (Haier) password.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -17,7 +24,8 @@
       "cannot_connect": "Cannot connect to the Haier cloud"
     },
     "abort": {
-      "already_configured": "This account is already configured"
+      "already_configured": "This account is already configured",
+      "reauth_successful": "Reauthentication successful"
     }
   },
   "selector": {

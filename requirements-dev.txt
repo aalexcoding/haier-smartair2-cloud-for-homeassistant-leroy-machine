@@ -1,2 +1,5 @@
 pytest>=8.0
 pytest-asyncio>=0.24
+paho-mqtt>=2.1.0
+cryptography
+voluptuous

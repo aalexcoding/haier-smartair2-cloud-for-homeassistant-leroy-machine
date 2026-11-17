@@ -48,6 +48,8 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_RETRY_DELAY_SECONDS = 30
+_MAX_RETRY_DELAY_SECONDS = 300
 
 
 def _tls_ctx() -> ssl.SSLContext:
@@ -88,12 +90,16 @@ class HaierCloudClient:
         password: str,
         gateway: str,
         app_client_id: str | None = None,
+        *,
+        on_auth_failed: Callable[[], None] | None = None,
     ) -> None:
         self._hass = hass
         self._username = username
         self._password = password
         self._gateway = gateway
         self._app_client_id = app_client_id or generate_client_id()
+        self._on_auth_failed = on_auth_failed
+        self._auth_failed = False
         self._token: str | None = None
         self._client: mqtt.Client | None = None
         self._broker_port: int | None = None
@@ -110,6 +116,9 @@ class HaierCloudClient:
         self._reconnecting = False
         self._stopped = False
         self._refresh_unsub: asyncio.TimerHandle | None = None
+        self._retry_unsub: asyncio.TimerHandle | None = None
+        self._retry_delay = _RETRY_DELAY_SECONDS
+        self._reconnect_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ debug
 
@@ -152,6 +161,8 @@ class HaierCloudClient:
     # --------------------------------------------------------------------- REST
 
     async def async_login(self) -> str:
+        if self._auth_failed or self._stopped:
+            raise CloudAuthError("Cloud client stopped; reauthentication required")
         session = async_get_clientsession(self._hass)
         body = {
             "loginId": self._username,
@@ -253,11 +264,18 @@ class HaierCloudClient:
         await self._connect()
         self._schedule_refresh()
 
+    def _cancel_timers(self) -> None:
+        """Cancel refresh and retry callbacks before reconnecting or stopping."""
+        for attribute in ("_refresh_unsub", "_retry_unsub"):
+            if (handle := getattr(self, attribute)) is not None:
+                handle.cancel()
+                setattr(self, attribute, None)
+
     def _schedule_refresh(self) -> None:
         if self._refresh_unsub is not None:
             self._refresh_unsub.cancel()
             self._refresh_unsub = None
-        if self._stopped:
+        if self._stopped or self._auth_failed:
             return
         loop = self._hass.loop
         self._refresh_unsub = loop.call_later(
@@ -267,6 +285,8 @@ class HaierCloudClient:
 
     async def _connect(self) -> None:
         async with self._lock:
+            if self._stopped or self._auth_failed:
+                return
             await self.async_login()
             self._broker_port = await self._hass.async_add_executor_job(self._master_gw_blocking)
             username, password = _make_auth()
@@ -274,6 +294,7 @@ class HaierCloudClient:
                 mqtt.CallbackAPIVersion.VERSION2,
                 client_id="HA" + os.urandom(8).hex().upper(),
                 protocol=mqtt.MQTTv31,
+                reconnect_on_failure=False,
             )
             client.username_pw_set(username, password)
             client.tls_set_context(_tls_ctx())
@@ -294,27 +315,52 @@ class HaierCloudClient:
             client.loop_start()
 
     async def _reconnect(self, reason: str) -> None:
-        if self._stopped or self._reconnecting:
+        if (
+            self._stopped
+            or self._auth_failed
+            or self._reconnecting
+            or self._retry_unsub is not None
+        ):
             return
         self._reconnecting = True
+        self._reconnect_task = asyncio.current_task()
+        self._cancel_timers()
         _LOGGER.info("Haier cloud reconnect: %s", reason)
         try:
             if self._client:
                 try:
-                    self._client.loop_stop()
+                    await self._hass.async_add_executor_job(self._client.loop_stop)
                     self._client.disconnect()
                 except Exception:  # noqa: BLE001
                     pass
+                self._client = None
             await asyncio.sleep(2)
             await self._connect()
+        except CloudAuthError:
+            self._auth_failed = True
+            self._token = None
+            self._online.clear()
+            self._notify()
+            _LOGGER.warning("Haier authentication failed; reauthentication required")
+            if self._on_auth_failed is not None:
+                self._on_auth_failed()
         except Exception:  # noqa: BLE001
-            _LOGGER.exception("reconnect failed; retrying in 30s")
-            self._hass.loop.call_later(
-                30, lambda: self._hass.async_create_background_task(self._reconnect("retry"), "haier_cloud_reconnect")
-            )
+            if not self._stopped:
+                delay = self._retry_delay
+                self._retry_delay = min(delay * 2, _MAX_RETRY_DELAY_SECONDS)
+                _LOGGER.exception("Haier reconnect failed; retrying in %ss", delay)
+
+                def retry() -> None:
+                    self._retry_unsub = None
+                    self._hass.async_create_background_task(self._reconnect("retry"), "haier_cloud_reconnect")
+
+                self._retry_unsub = self._hass.loop.call_later(delay, retry)
+        else:
+            self._retry_delay = _RETRY_DELAY_SECONDS
+            self._schedule_refresh()
         finally:
             self._reconnecting = False
-            self._schedule_refresh()
+            self._reconnect_task = None
 
     # --------------------------------------------------------------- callbacks
 
@@ -591,8 +637,10 @@ class HaierCloudClient:
 
     async def async_stop(self) -> None:
         self._stopped = True
-        if self._refresh_unsub:
-            self._refresh_unsub.cancel()
+        self._cancel_timers()
+        if self._reconnect_task is not None:
+            self._reconnect_task.cancel()
+            await asyncio.gather(self._reconnect_task, return_exceptions=True)
         if self._client:
             await self._hass.async_add_executor_job(self._client.loop_stop)
             try:
