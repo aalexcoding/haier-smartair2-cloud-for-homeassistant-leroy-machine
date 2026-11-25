@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fall back to port 443 for the Haier REST API (login and device list) when the usual port 7263 refuses connections, and remember whichever port answered. In November 2026, port 7263 started refusing connections while the same API kept answering on 443. That broke setup (`Haier device list failed: Cannot connect to host uhome.haieriot.net:7263`) and every cloud reconnect.
 - Fix commands failing with `Haier MQTT not connected` while the entity still looked available. The device now shows as unavailable once the cloud has been unreachable for more than 60 seconds. Short reconnects, such as the token refresh, do not affect it.
 - A command sent while disconnected skips the back-off wait, reconnects at once and waits up to 15 seconds instead of failing straight away. Commands cannot start a new login more than once every 15 seconds.
 - Treat the cloud session as ready only after the broker confirms the reply subscriptions (SUBACK, or a 5-second fallback). This prevents commands from losing their ACK right after a reconnect.

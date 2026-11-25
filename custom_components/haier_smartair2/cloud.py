@@ -41,7 +41,7 @@ from .const import (
     APP_VERSION,
     AUTH_SALT,
     LOGIN_HOST,
-    LOGIN_PORT,
+    LOGIN_PORTS,
     MASTER_GW_PORT,
     REST_CLIENT_ID,
     TOKEN_REFRESH_SECONDS,
@@ -57,7 +57,8 @@ _WATCHDOG_SECONDS = 60
 _CONNECT_GRACE_SECONDS = 20
 # Upper bound for login + gateway discovery + MQTT connect.
 _CONNECT_TIMEOUT_SECONDS = 60
-_LOGIN_TIMEOUT_SECONDS = 20
+# Per REST port; a dead port must leave time to try the next one.
+_REST_PORT_TIMEOUT_SECONDS = 10
 # A reconnect running this long is stuck (it should time out well before).
 _STUCK_RECONNECT_SECONDS = 2 * _CONNECT_TIMEOUT_SECONDS + 30
 _COMMAND_CONNECT_WAIT_SECONDS = 15
@@ -67,6 +68,10 @@ _COMMAND_RECONNECT_MIN_INTERVAL = 15
 # Entities stay available across short reconnects (e.g. the token refresh).
 _OFFLINE_GRACE_SECONDS = 60
 _AUTH_REJECTIONS_BEFORE_REAUTH = 3
+
+
+# REST port that last answered; shared so config flows and entries agree.
+_rest_port: int = LOGIN_PORTS[0]
 
 
 def _tls_ctx() -> ssl.SSLContext:
@@ -194,7 +199,6 @@ class HaierCloudClient:
     async def async_login(self) -> str:
         if self._auth_failed or self._stopped:
             raise CloudAuthError("Cloud client stopped; reauthentication required")
-        session = async_get_clientsession(self._hass)
         body = {
             "loginId": self._username,
             "password": self._password,
@@ -210,10 +214,7 @@ class HaierCloudClient:
             "Content-Type": "application/json;charset=utf-8",
             "Accept": "application/json",
         }
-        url = f"https://{LOGIN_HOST}:{LOGIN_PORT}/uhome/acbiz/login"
-        async with asyncio.timeout(_LOGIN_TIMEOUT_SECONDS):
-            async with session.post(url, data=json.dumps(body), headers=headers) as resp:
-                data = await resp.json(content_type=None)
+        data = await self._async_rest_post("/uhome/acbiz/login", body, headers)
         if not isinstance(data, dict):
             raise ConnectionError("Haier login returned an unexpected response")
         _LOGGER.debug("Haier login returned retCode=%s", data.get("retCode"))
@@ -223,11 +224,37 @@ class HaierCloudClient:
         self._auth_rejections = 0
         return self._token
 
+    async def _async_rest_post(self, path: str, body: dict, headers: dict) -> object:
+        """POST to the Haier REST API, falling back to the next known port.
+
+        Only connection-level failures (refused, unreachable, timeout) move on
+        to the next port; any HTTP answer is returned to the caller as-is.
+        """
+        global _rest_port
+        session = async_get_clientsession(self._hass)
+        ports = [_rest_port, *(port for port in LOGIN_PORTS if port != _rest_port)]
+        last_error: Exception | None = None
+        for port in ports:
+            url = f"https://{LOGIN_HOST}:{port}{path}"
+            try:
+                async with asyncio.timeout(_REST_PORT_TIMEOUT_SECONDS):
+                    async with session.post(url, data=json.dumps(body), headers=headers) as resp:
+                        data = await resp.json(content_type=None)
+            except OSError as err:  # includes aiohttp connector errors and timeouts
+                _LOGGER.debug("Haier REST port %s unreachable: %s", port, err)
+                last_error = err
+                continue
+            if port != _rest_port:
+                _LOGGER.info("Haier REST API now answering on port %s", port)
+                _rest_port = port
+            return data
+        assert last_error is not None
+        raise last_error
+
     async def async_get_devices(self) -> list[dict]:
         """Return [{id, name, type}] from get_userDevlist."""
         if not self._token:
             await self.async_login()
-        session = async_get_clientsession(self._hass)
         headers = {
             "appKey": APP_KEY,
             "appId": APP_ID,
@@ -238,9 +265,11 @@ class HaierCloudClient:
             "Accept": "application/json",
         }
         body = {"get_devlist_info": {"sctx": {"appId": APP_ID, "appVersion": APP_VERSION, "clientId": REST_CLIENT_ID}}}
-        url = f"https://{LOGIN_HOST}:{LOGIN_PORT}/uhome/acbiz/device/v25/get_userDevlist"
-        async with session.post(url, data=json.dumps(body), headers=headers) as resp:
-            data = await resp.json(content_type=None)
+        data = await self._async_rest_post(
+            "/uhome/acbiz/device/v25/get_userDevlist", body, headers
+        )
+        if not isinstance(data, dict):
+            raise ConnectionError("Haier device list returned an unexpected response")
         out: list[dict] = []
         for city in data.get("cityListResult") or []:
             for room in city.get("roomDeviceResultList") or []:

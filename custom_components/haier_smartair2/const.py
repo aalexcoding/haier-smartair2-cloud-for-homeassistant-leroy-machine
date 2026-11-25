@@ -27,7 +27,9 @@ CONF_CLIENT_ID = "client_id"  # per-installation gateway client id (generated)
 
 # --- cloud REST (login) ---
 LOGIN_HOST = "uhome.haieriot.net"
-LOGIN_PORT = 7263
+# 7263 is the historical REST port. In Nov 2026 it started refusing connections
+# while the same API kept answering on 443, so both are tried in order.
+LOGIN_PORTS = (7263, 443)
 APP_KEY = "c403cbfc780dd8a0ab68784bb6d3023b"
 APP_ID = "MB-HKQHWBB-0001"
 APP_VERSION = "3.2.1"

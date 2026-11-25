@@ -589,3 +589,68 @@ def test_gateway_discovery_eof_does_not_spin(modules):
     sock = types.SimpleNamespace(recv=Mock(return_value=b""))
     with pytest.raises(ConnectionError):
         modules.cloud._recv_or_raise(sock)
+
+
+class FakeRestSession:
+    """aiohttp-like session; maps port -> exception or JSON reply."""
+
+    def __init__(self, replies):
+        self.replies = replies
+        self.urls = []
+
+    def post(self, url, **kwargs):
+        self.urls.append(url)
+        reply = self.replies[int(url.split(":")[2].split("/")[0])]
+        session = self
+
+        class Response:
+            async def __aenter__(self):
+                if isinstance(reply, Exception):
+                    raise reply
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def json(self, content_type=None):
+                return reply
+
+        return Response()
+
+
+@pytest.mark.asyncio
+async def test_rest_falls_back_to_443_and_remembers_it(modules, client, monkeypatch):
+    monkeypatch.setattr(modules.cloud, "_rest_port", 7263)
+    session = FakeRestSession({
+        7263: ConnectionRefusedError("Connect call failed"),
+        443: {"retCode": "00000", "accessToken": "token"},
+    })
+    monkeypatch.setattr(modules.cloud, "async_get_clientsession", Mock(return_value=session))
+    assert await client.async_login() == "token"
+    assert session.urls == [
+        "https://uhome.haieriot.net:7263/uhome/acbiz/login",
+        "https://uhome.haieriot.net:443/uhome/acbiz/login",
+    ]
+    assert modules.cloud._rest_port == 443
+    session.urls.clear()
+    await client.async_login()
+    assert len(session.urls) == 1 and ":443/" in session.urls[0]
+
+
+@pytest.mark.asyncio
+async def test_rest_does_not_fall_back_on_an_answer(modules, client, monkeypatch):
+    monkeypatch.setattr(modules.cloud, "_rest_port", 7263)
+    session = FakeRestSession({7263: {"retCode": "B00002-21008", "retInfo": "bad"}, 443: {}})
+    monkeypatch.setattr(modules.cloud, "async_get_clientsession", Mock(return_value=session))
+    with pytest.raises(modules.cloud.CloudAuthError):
+        await client.async_login()
+    assert len(session.urls) == 1
+
+
+@pytest.mark.asyncio
+async def test_rest_all_ports_down_is_a_connection_error(modules, client, monkeypatch):
+    monkeypatch.setattr(modules.cloud, "_rest_port", 7263)
+    session = FakeRestSession({7263: ConnectionRefusedError(), 443: TimeoutError()})
+    monkeypatch.setattr(modules.cloud, "async_get_clientsession", Mock(return_value=session))
+    with pytest.raises(OSError):  # retried with back-off, never treated as bad credentials
+        await client.async_login()
