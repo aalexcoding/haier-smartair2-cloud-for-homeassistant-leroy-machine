@@ -110,7 +110,7 @@ The configuration flow supports:
 
 You can change region and local mappings later in the integration options. Changing the transport may affect entity IDs, so review dashboards and automations afterward.
 
-If Haier rejects your password, the integration stops automatic login attempts. Open **Settings → Devices & services** and follow the reauthentication prompt to enter your current SmartAir2 password. Your devices and settings are preserved. Temporary connection failures retry with increasing delays, up to five minutes.
+If Haier rejects your login three times in a row, the integration stops automatic login attempts. Open **Settings → Devices & services** and follow the reauthentication prompt to enter your current SmartAir2 password. Your devices and settings are preserved. A single rejection is retried, because Haier also rejects logins during rate limiting or maintenance. Temporary connection failures retry with increasing delays, up to five minutes. Sending a command while disconnected reconnects straight away and waits up to 15 seconds. If the cloud stays unreachable for more than a minute, the devices show as unavailable.
 
 ## How V3 cloud control works
 

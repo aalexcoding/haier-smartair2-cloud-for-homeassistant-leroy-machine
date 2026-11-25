@@ -23,6 +23,7 @@ import os
 import socket
 import ssl
 import struct
+import time
 from collections.abc import Callable
 
 import paho.mqtt.client as mqtt
@@ -50,6 +51,22 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 _RETRY_DELAY_SECONDS = 30
 _MAX_RETRY_DELAY_SECONDS = 300
+_WATCHDOG_SECONDS = 60
+# How long a freshly opened MQTT session may stay without CONNACK/SUBACK before
+# the watchdog or a user command considers it dead and forces a reconnect.
+_CONNECT_GRACE_SECONDS = 20
+# Upper bound for login + gateway discovery + MQTT connect.
+_CONNECT_TIMEOUT_SECONDS = 60
+_LOGIN_TIMEOUT_SECONDS = 20
+# A reconnect running this long is stuck (it should time out well before).
+_STUCK_RECONNECT_SECONDS = 2 * _CONNECT_TIMEOUT_SECONDS + 30
+_COMMAND_CONNECT_WAIT_SECONDS = 15
+_SUBACK_FALLBACK_SECONDS = 5
+# A command may skip the back-off, but not trigger logins more often than this.
+_COMMAND_RECONNECT_MIN_INTERVAL = 15
+# Entities stay available across short reconnects (e.g. the token refresh).
+_OFFLINE_GRACE_SECONDS = 60
+_AUTH_REJECTIONS_BEFORE_REAUTH = 3
 
 
 def _tls_ctx() -> ssl.SSLContext:
@@ -119,6 +136,15 @@ class HaierCloudClient:
         self._retry_unsub: asyncio.TimerHandle | None = None
         self._retry_delay = _RETRY_DELAY_SECONDS
         self._reconnect_task: asyncio.Task | None = None
+        self._watchdog_unsub: asyncio.TimerHandle | None = None
+        self._offline_unsub: asyncio.TimerHandle | None = None
+        self._connect_started = 0.0
+        self._reconnect_started = 0.0
+        self._last_attempt = 0.0
+        self._session_ready = False
+        self._sub_mid: int | None = None
+        self._disconnected_since: float | None = None
+        self._auth_rejections = 0
 
     # ------------------------------------------------------------------ debug
 
@@ -149,6 +175,11 @@ class HaierCloudClient:
         return self._frames.get(devid.upper())
 
     def is_online(self, devid: str) -> bool:
+        if (
+            self._disconnected_since is not None
+            and time.monotonic() - self._disconnected_since > _OFFLINE_GRACE_SECONDS
+        ):
+            return False  # we cannot reach the device while the cloud is down
         return self._online.get(devid.upper(), False)
 
     def _notify(self) -> None:
@@ -180,12 +211,16 @@ class HaierCloudClient:
             "Accept": "application/json",
         }
         url = f"https://{LOGIN_HOST}:{LOGIN_PORT}/uhome/acbiz/login"
-        async with session.post(url, data=json.dumps(body), headers=headers) as resp:
-            data = await resp.json(content_type=None)
+        async with asyncio.timeout(_LOGIN_TIMEOUT_SECONDS):
+            async with session.post(url, data=json.dumps(body), headers=headers) as resp:
+                data = await resp.json(content_type=None)
+        if not isinstance(data, dict):
+            raise ConnectionError("Haier login returned an unexpected response")
         _LOGGER.debug("Haier login returned retCode=%s", data.get("retCode"))
         if data.get("retCode") != "00000" or not data.get("accessToken"):
             raise CloudAuthError(f"login failed: {data.get('retCode')} {data.get('retInfo')}")
         self._token = data["accessToken"]
+        self._auth_rejections = 0
         return self._token
 
     async def async_get_devices(self) -> list[dict]:
@@ -250,10 +285,10 @@ class HaierCloudClient:
                 ss.sendall(bytes(hdr) + j)
                 data = b""
                 while len(data) < 8:
-                    data += ss.recv(4096)
+                    data += _recv_or_raise(ss)
                 ln = struct.unpack(">H", data[6:8])[0]
                 while len(data) < 8 + ln:
-                    data += ss.recv(4096)
+                    data += _recv_or_raise(ss)
                 reply = json.loads(data[8 : 8 + ln])
                 _LOGGER.debug("Haier gateway discovery succeeded")
                 return reply["port"]
@@ -263,6 +298,104 @@ class HaierCloudClient:
     async def async_start(self) -> None:
         await self._connect()
         self._schedule_refresh()
+        self._schedule_watchdog()
+
+    # ------------------------------------------------------------ session state
+
+    def _is_connected(self) -> bool:
+        """True only once the broker accepted us AND our subscriptions are live.
+
+        paho reports ``is_connected()`` before ``on_connect`` has subscribed to
+        the response topics, so a command sent in that gap would lose its ACK.
+        """
+        return bool(
+            self._session_ready
+            and self._client is not None
+            and self._client.is_connected()
+            and self._token
+        )
+
+    def _connection_lost(self) -> bool:
+        """True when no healthy session exists and nothing is repairing it."""
+        if self._stopped or self._auth_failed or self._is_connected():
+            return False
+        if self._reconnecting or self._retry_unsub is not None:
+            return False
+        # A session that was just opened may still be waiting for CONNACK/SUBACK.
+        return (
+            self._client is None
+            or time.monotonic() - self._connect_started > _CONNECT_GRACE_SECONDS
+        )
+
+    def _set_session_ready(self, client: mqtt.Client) -> None:
+        if client is not self._client or self._stopped:
+            return
+        self._session_ready = True
+        self._disconnected_since = None
+        self._auth_rejections = 0
+        # Only a session that really works proves the cloud is healthy again.
+        self._retry_delay = _RETRY_DELAY_SECONDS
+        _LOGGER.debug("Haier cloud session ready")
+        self._notify()
+
+    def _mark_disconnected(self) -> None:
+        """Start the availability grace period for a dropped session."""
+        self._session_ready = False
+        if self._disconnected_since is None:
+            self._disconnected_since = time.monotonic()
+            if self._offline_unsub is not None:
+                self._offline_unsub.cancel()
+            self._offline_unsub = self._hass.loop.call_later(
+                _OFFLINE_GRACE_SECONDS + 1, self._offline_grace_expired
+            )
+
+    def _offline_grace_expired(self) -> None:
+        self._offline_unsub = None
+        if self._disconnected_since is not None:
+            self._notify()
+
+    def _discard_client(self) -> None:
+        """Detach the current client so its late callbacks are ignored."""
+        client, self._client = self._client, None
+        self._session_ready = False
+        self._sub_mid = None
+        if client is None:
+            return
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ----------------------------------------------------------------- timers
+
+    def _schedule_watchdog(self) -> None:
+        if self._watchdog_unsub is not None:
+            self._watchdog_unsub.cancel()
+            self._watchdog_unsub = None
+        if self._stopped or self._auth_failed:
+            return
+        self._watchdog_unsub = self._hass.loop.call_later(_WATCHDOG_SECONDS, self._watchdog)
+
+    def _watchdog(self) -> None:
+        """Recover a session that is dead with nothing repairing it.
+
+        Also cancels a reconnect that has been running far longer than its own
+        timeout, which would otherwise block every later reconnect for good.
+        """
+        self._watchdog_unsub = None
+        if (
+            self._reconnecting
+            and self._reconnect_task is not None
+            and time.monotonic() - self._reconnect_started > _STUCK_RECONNECT_SECONDS
+        ):
+            _LOGGER.error("Haier cloud reconnect stuck for over %ss; restarting it", _STUCK_RECONNECT_SECONDS)
+            self._reconnect_task.cancel()
+        elif self._connection_lost():
+            self._hass.async_create_background_task(
+                self._reconnect("watchdog"), "haier_cloud_reconnect"
+            )
+        self._schedule_watchdog()
 
     def _cancel_timers(self) -> None:
         """Cancel refresh and retry callbacks before reconnecting or stopping."""
@@ -283,36 +416,68 @@ class HaierCloudClient:
             lambda: self._hass.async_create_background_task(self._reconnect("token refresh"), "haier_cloud_reconnect"),
         )
 
+    def _schedule_retry(self, reason: str) -> None:
+        """Retry later with exponential back-off."""
+        if self._stopped or self._auth_failed or self._retry_unsub is not None:
+            return
+        delay = self._retry_delay
+        self._retry_delay = min(delay * 2, _MAX_RETRY_DELAY_SECONDS)
+        _LOGGER.warning("Haier cloud %s; retrying in %ss", reason, delay)
+
+        def retry() -> None:
+            self._retry_unsub = None
+            self._hass.async_create_background_task(self._reconnect("retry"), "haier_cloud_reconnect")
+
+        self._retry_unsub = self._hass.loop.call_later(delay, retry)
+
+    # ---------------------------------------------------------------- connect
+
     async def _connect(self) -> None:
         async with self._lock:
             if self._stopped or self._auth_failed:
                 return
-            await self.async_login()
-            self._broker_port = await self._hass.async_add_executor_job(self._master_gw_blocking)
-            username, password = _make_auth()
-            client = mqtt.Client(
-                mqtt.CallbackAPIVersion.VERSION2,
-                client_id="HA" + os.urandom(8).hex().upper(),
-                protocol=mqtt.MQTTv31,
-                reconnect_on_failure=False,
-            )
-            client.username_pw_set(username, password)
-            client.tls_set_context(_tls_ctx())
-            client.on_connect = self._on_connect
-            client.on_message = self._on_message
-            client.on_disconnect = self._on_disconnect
-            client.on_subscribe = self._on_subscribe
-            self._client = client
-            _LOGGER.debug(
-                "DBG MQTT connecting to %s:%s (devices: %s)",
-                self._gateway,
-                self._broker_port,
-                sorted(self._devices),
-            )
-            await self._hass.async_add_executor_job(
-                client.connect, self._gateway, self._broker_port, 30
-            )
-            client.loop_start()
+            self._last_attempt = time.monotonic()
+            try:
+                async with asyncio.timeout(_CONNECT_TIMEOUT_SECONDS):
+                    await self._connect_unlocked()
+            except BaseException:
+                # Never leave a half-open client behind: it would look like a
+                # session still waiting for CONNACK and suppress recovery.
+                await self._hass.async_add_executor_job(self._discard_client)
+                raise
+
+    async def _connect_unlocked(self) -> None:
+        await self.async_login()
+        self._broker_port = await self._hass.async_add_executor_job(self._master_gw_blocking)
+        username, password = _make_auth()
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id="HA" + os.urandom(8).hex().upper(),
+            protocol=mqtt.MQTTv31,
+            reconnect_on_failure=False,
+        )
+        # An exception escaping a callback would kill paho's network thread
+        # while is_connected() keeps returning True.
+        client.suppress_exceptions = True
+        client.username_pw_set(username, password)
+        client.tls_set_context(_tls_ctx())
+        client.on_connect = self._on_connect
+        client.on_message = self._on_message
+        client.on_disconnect = self._on_disconnect
+        client.on_subscribe = self._on_subscribe
+        self._client = client
+        self._session_ready = False
+        self._connect_started = time.monotonic()
+        _LOGGER.debug(
+            "DBG MQTT connecting to %s:%s (devices: %s)",
+            self._gateway,
+            self._broker_port,
+            sorted(self._devices),
+        )
+        await self._hass.async_add_executor_job(
+            client.connect, self._gateway, self._broker_port, 30
+        )
+        client.loop_start()
 
     async def _reconnect(self, reason: str) -> None:
         if (
@@ -323,40 +488,38 @@ class HaierCloudClient:
         ):
             return
         self._reconnecting = True
+        self._reconnect_started = time.monotonic()
         self._reconnect_task = asyncio.current_task()
         self._cancel_timers()
         _LOGGER.info("Haier cloud reconnect: %s", reason)
         try:
-            if self._client:
-                try:
-                    await self._hass.async_add_executor_job(self._client.loop_stop)
-                    self._client.disconnect()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._client = None
+            if self._client is not None:
+                self._mark_disconnected()
+                # Detach first so the old client's on_disconnect is ignored.
+                await self._hass.async_add_executor_job(self._discard_client)
             await asyncio.sleep(2)
             await self._connect()
-        except CloudAuthError:
-            self._auth_failed = True
-            self._token = None
-            self._online.clear()
-            self._notify()
-            _LOGGER.warning("Haier authentication failed; reauthentication required")
-            if self._on_auth_failed is not None:
-                self._on_auth_failed()
-        except Exception:  # noqa: BLE001
-            if not self._stopped:
-                delay = self._retry_delay
-                self._retry_delay = min(delay * 2, _MAX_RETRY_DELAY_SECONDS)
-                _LOGGER.exception("Haier reconnect failed; retrying in %ss", delay)
-
-                def retry() -> None:
-                    self._retry_unsub = None
-                    self._hass.async_create_background_task(self._reconnect("retry"), "haier_cloud_reconnect")
-
-                self._retry_unsub = self._hass.loop.call_later(delay, retry)
+        except CloudAuthError as err:
+            self._auth_rejections += 1
+            if self._auth_rejections < _AUTH_REJECTIONS_BEFORE_REAUTH:
+                # Haier also answers rate limits and maintenance with non-zero
+                # retCodes; only a repeated rejection means bad credentials.
+                self._schedule_retry(
+                    f"login rejected ({err}), attempt {self._auth_rejections}"
+                    f" of {_AUTH_REJECTIONS_BEFORE_REAUTH}"
+                )
+            else:
+                self._auth_failed = True
+                self._token = None
+                self._online.clear()
+                self._notify()
+                _LOGGER.warning("Haier authentication failed; reauthentication required")
+                if self._on_auth_failed is not None:
+                    self._on_auth_failed()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Haier reconnect failure details", exc_info=True)
+            self._schedule_retry(f"reconnect failed ({type(err).__name__}: {err})")
         else:
-            self._retry_delay = _RETRY_DELAY_SECONDS
             self._schedule_refresh()
         finally:
             self._reconnecting = False
@@ -367,10 +530,12 @@ class HaierCloudClient:
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
         _LOGGER.debug("DBG MQTT CONNACK rc=%s", reason_code)
         if getattr(reason_code, "value", reason_code) != 0:
+            # paho follows a refused CONNACK with on_disconnect, which retries
+            # with back-off because the session never became ready.
             _LOGGER.warning("Haier cloud CONNACK rc=%s", reason_code)
             return
         token = self._token
-        client.subscribe(
+        _rc, self._sub_mid = client.subscribe(
             [(f"Client/{self._app_client_id}/Business/Down", 0), (f"User/{token}/#", 0)]
         )
         self._sn += 1
@@ -385,19 +550,60 @@ class HaierCloudClient:
 
         for devid in self._devices:
             self._publish_epp(devid, POLL_FRAME)
+        self._hass.loop.call_soon_threadsafe(self._arm_suback_fallback, client)
+
+    def _arm_suback_fallback(self, client: mqtt.Client) -> None:
+        self._hass.loop.call_later(
+            _SUBACK_FALLBACK_SECONDS, self._suback_fallback, client
+        )
+
+    def _suback_fallback(self, client: mqtt.Client) -> None:
+        """Do not block commands forever if the broker never sends SUBACK."""
+        if (
+            client is self._client
+            and not self._session_ready
+            and not self._stopped
+            and client.is_connected()
+        ):
+            _LOGGER.warning("Haier cloud sent no SUBACK; assuming subscriptions are active")
+            self._set_session_ready(client)
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None) -> None:
         _LOGGER.debug("DBG MQTT SUBACK mid=%s codes=%s", mid, reason_codes)
+        if mid != self._sub_mid:
+            return
+        if any(getattr(code, "is_failure", False) for code in reason_codes or []):
+            _LOGGER.warning("Haier cloud refused subscription: %s", reason_codes)
+            return
+        self._hass.loop.call_soon_threadsafe(self._set_session_ready, client)
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None) -> None:
         if self._stopped:
             return
         _LOGGER.info("Haier cloud disconnected rc=%s", reason_code)
-        self._hass.loop.call_soon_threadsafe(
-            lambda: self._hass.async_create_background_task(self._reconnect("disconnect"), "haier_cloud_reconnect")
-        )
+        self._hass.loop.call_soon_threadsafe(self._handle_disconnect, client)
+
+    def _handle_disconnect(self, client: mqtt.Client) -> None:
+        if self._stopped or self._auth_failed or client is None or client is not self._client:
+            return  # a client we already replaced, stopped or gave up on
+        was_ready = self._session_ready
+        self._mark_disconnected()
+        if was_ready:
+            self._hass.async_create_background_task(
+                self._reconnect("disconnect"), "haier_cloud_reconnect"
+            )
+        else:
+            # Refused or dropped before it ever worked: reconnecting at once
+            # would hammer the login API in a tight loop.
+            self._schedule_retry("connection dropped before the session was ready")
 
     def _on_message(self, client, userdata, msg) -> None:
+        try:
+            self._handle_message(msg)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Haier cloud: failed to handle MQTT message")
+
+    def _handle_message(self, msg) -> None:
         _LOGGER.debug("SmartAir2 MQTT message received on %s", self._mask(msg.topic))
         try:
             payload = json.loads(msg.payload)
@@ -439,7 +645,13 @@ class HaierCloudClient:
                 _LOGGER.debug("DBG   -> boundDevs data not decodable, dropped")
                 return
             _LOGGER.debug("Cloud device binding response received")
-            for d in inner.get("devs") or []:
+            devs = inner.get("devs") if isinstance(inner, dict) else None
+            if not isinstance(devs, list):
+                _LOGGER.debug("DBG   -> boundDevs without device list, dropped")
+                return
+            for d in devs:
+                if not isinstance(d, dict):
+                    continue
                 _LOGGER.debug("DBG   -> device %s online=%s", d.get("id"), d.get("ol"))
                 self._online[str(d.get("id", "")).upper()] = bool(d.get("ol"))
             self._hass.loop.call_soon_threadsafe(self._notify)
@@ -543,8 +755,41 @@ class HaierCloudClient:
     def _v3_check_connection(self, devid: str) -> None:
         if devid not in self._devices:
             raise RuntimeError("Unknown cloud device")
-        if not self._client or not self._client.is_connected() or not self._token:
+        if not self._is_connected():
             raise RuntimeError("Haier MQTT not connected")
+
+    async def _async_ensure_connected(self, devid: str) -> None:
+        """Reconnect on demand instead of failing a command while offline."""
+        if devid not in self._devices:
+            raise RuntimeError("Unknown cloud device")
+        if self._is_connected():
+            return
+        self._raise_if_unusable()
+        recently_tried = time.monotonic() - self._last_attempt < _COMMAND_RECONNECT_MIN_INTERVAL
+        if self._retry_unsub is not None and not recently_tried:
+            # Skip the back-off wait (keeping its length): a user is actively
+            # trying to use the device. Always start the reconnect ourselves.
+            self._retry_unsub.cancel()
+            self._retry_unsub = None
+            self._start_reconnect("command while disconnected")
+        elif self._connection_lost() and not recently_tried:
+            self._start_reconnect("command while disconnected")
+        deadline = time.monotonic() + _COMMAND_CONNECT_WAIT_SECONDS
+        while not self._is_connected() and time.monotonic() < deadline:
+            self._raise_if_unusable()
+            await asyncio.sleep(0.5)
+        self._v3_check_connection(devid)
+
+    def _start_reconnect(self, reason: str) -> None:
+        self._hass.async_create_background_task(
+            self._reconnect(reason), "haier_cloud_reconnect"
+        )
+
+    def _raise_if_unusable(self) -> None:
+        if self._stopped:
+            raise RuntimeError("Haier cloud client stopped")
+        if self._auth_failed:
+            raise RuntimeError("Haier login rejected; reauthenticate the integration")
 
     async def _async_v3_publish(
         self, devid: str, payload: dict, operation: bool, expected: dict[str, str]
@@ -599,7 +844,7 @@ class HaierCloudClient:
         value = "true" if power else "false"
         lock = self._control_locks.setdefault(devid, asyncio.Lock())
         async with lock:
-            self._v3_check_connection(devid)
+            await self._async_ensure_connected(devid)
             if same_attr("onOffStatus", self.latest_attrs(devid).get("onOffStatus"), value):
                 return
             await self._async_v3_publish(
@@ -612,7 +857,7 @@ class HaierCloudClient:
         devid = devid.upper()
         lock = self._control_locks.setdefault(devid, asyncio.Lock())
         async with lock:
-            self._v3_check_connection(devid)
+            await self._async_ensure_connected(devid)
             attrs = self.latest_attrs(devid)
             if normalized(attrs.get("onOffStatus", "")).lower() not in ("true", "1"):
                 raise RuntimeError("V3 power not confirmed ON; refusing grSetDAC")
@@ -638,15 +883,21 @@ class HaierCloudClient:
     async def async_stop(self) -> None:
         self._stopped = True
         self._cancel_timers()
+        for attribute in ("_watchdog_unsub", "_offline_unsub"):
+            if (handle := getattr(self, attribute)) is not None:
+                handle.cancel()
+                setattr(self, attribute, None)
         if self._reconnect_task is not None:
             self._reconnect_task.cancel()
             await asyncio.gather(self._reconnect_task, return_exceptions=True)
-        if self._client:
-            await self._hass.async_add_executor_job(self._client.loop_stop)
-            try:
-                self._client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+        await self._hass.async_add_executor_job(self._discard_client)
+
+
+def _recv_or_raise(sock) -> bytes:
+    chunk = sock.recv(4096)
+    if not chunk:
+        raise ConnectionError("Haier gateway closed the connection")
+    return chunk
 
 
 class CloudAuthError(Exception):

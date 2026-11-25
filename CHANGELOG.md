@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Fix commands failing with `Haier MQTT not connected` while the entity still looked available. The device now shows as unavailable once the cloud has been unreachable for more than 60 seconds. Short reconnects, such as the token refresh, do not affect it.
+- A command sent while disconnected skips the back-off wait, reconnects at once and waits up to 15 seconds instead of failing straight away. Commands cannot start a new login more than once every 15 seconds.
+- Treat the cloud session as ready only after the broker confirms the reply subscriptions (SUBACK, or a 5-second fallback). This prevents commands from losing their ACK right after a reconnect.
+- Reset the reconnect back-off only once a session works. A broker that accepts the socket but refuses or drops the session no longer causes a login every few seconds.
+- Limit login to 20 seconds and a whole connection attempt to 60 seconds. A 60-second watchdog restarts a reconnect that is stuck and reconnects a session that is dead with no retry pending. A failed attempt no longer leaves a half-open client behind.
+- Gateway discovery no longer loops forever at 100% CPU if the gateway closes the socket mid-reply. Before, that blocked every later reconnect.
+- Malformed cloud messages can no longer kill the MQTT network thread.
+- Start reauthentication only after three login rejections in a row. Haier also rejects logins during rate limiting or maintenance. Initial setup still asks for the password on the first rejection.
+
 ## 0.2.2
 
 - Stop automatic cloud login attempts after an authentication failure and start Home Assistant reauthentication. Setup authentication failures now raise `ConfigEntryAuthFailed`.

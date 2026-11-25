@@ -76,7 +76,7 @@ Detalles en [COMPATIBILITY.md](COMPATIBILITY.md). No se garantiza que todos los 
 
 Puedes cambiar la región y las asociaciones locales en las opciones de la integración. Cambiar de transporte puede afectar a los identificadores de entidad.
 
-Si Haier rechaza la contraseña, la integración detiene los intentos automáticos de inicio de sesión. Abre **Ajustes → Dispositivos y servicios** y sigue el aviso de reautenticación para introducir tu contraseña actual de SmartAir2. Se conservan los dispositivos y los ajustes. Los fallos temporales de conexión se reintentan con intervalos crecientes, hasta cinco minutos.
+Si Haier rechaza el inicio de sesión tres veces seguidas, la integración detiene los intentos automáticos. Abre **Ajustes → Dispositivos y servicios** y sigue el aviso de reautenticación para introducir tu contraseña actual de SmartAir2. Se conservan los dispositivos y los ajustes. Un rechazo aislado se reintenta, porque Haier también rechaza inicios de sesión cuando limita peticiones o está en mantenimiento. Los fallos temporales de conexión se reintentan con intervalos crecientes, hasta cinco minutos. Si envías una orden mientras está desconectada, se reconecta al momento y espera hasta 15 segundos. Si la nube sigue inaccesible más de un minuto, los dispositivos aparecen como no disponibles.
 
 ## Limitaciones conocidas
 

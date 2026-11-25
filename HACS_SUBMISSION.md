@@ -24,7 +24,7 @@ Documentación de referencia (consultada el 2026-11-17):
 | Una sola integración en `custom_components/haier_smartair2/` | OK | Inspección local |
 | `hacs.json` con `name` y solo claves documentadas | OK | Se eliminó `render_readme`, que no figura en la documentación actual |
 | `manifest.json` con `domain`, `name`, `version`, `documentation`, `issue_tracker`, `codeowners` | OK | Inspección local |
-| `version` válida para AwesomeVersion | OK | `0.2.1` (SemVer); coincide con el tag de la próxima release |
+| `version` válida para AwesomeVersion | OK | `0.2.2` (SemVer); coincide con el tag de la próxima release |
 | `categories` válida (`climate.heat_pumps_air_conditioning`) | OK | Documentación de HA; hassfest no informa de errores ni avisos en esta clave |
 | Icono de marca local `brand/icon.png` (256×256) y `brand/icon@2x.png` (512×512) | OK | `magick identify` |
 | Workflow HACS (`hacs/action@main`, `category: integration`) | Creado | Ver §2: falta que pase en GitHub |
@@ -67,11 +67,11 @@ Archivo **`integration`** de `hacs/default` (array JSON), insertada en **orden a
 - Por tanto, quien instala la release `0.1.0` desde HACS recibe un código que Home Assistant muestra como `0.2.0-beta.1`. Los usuarios ven dos versiones distintas para el mismo código.
 - El tag `0.1.0` no existe en el clon local (no se ha hecho `git fetch --tags`).
 
-**Decisión tomada:** publicar la release estable **`0.2.1`**.
+**Decisión tomada:** publicar la release estable **`0.2.2`**. Sustituye a `0.2.1` e incluye la corrección de reautenticación y backoff pedida en la revisión de `hacs/default`.
 
-- `manifest.json` ya declara `"version": "0.2.1"` y el CHANGELOG tiene la sección `0.2.1`.
-- El tag debe ser exactamente `0.2.1`, sin prefijo `v`, igual que la release existente `0.1.0`.
-- `0.2.1 > 0.1.0`, así que quien tenga `0.1.0` recibirá la actualización en HACS.
+- `manifest.json` ya declara `"version": "0.2.2"` y el CHANGELOG tiene la sección `0.2.2`.
+- El tag debe ser exactamente `0.2.2`, sin prefijo `v`, igual que la release existente `0.1.0`.
+- `0.2.2 > 0.1.0`, así que quien tenga `0.1.0` recibirá la actualización en HACS.
 - No borres la release `0.1.0`. Puedes editar sus notas para indicar que contiene el código `0.2.0-beta.1`.
 
 **Pasos para crear la release (manuales):**
@@ -80,11 +80,11 @@ Archivo **`integration`** de `hacs/default` (array JSON), insertada en **orden a
 git switch main
 git pull
 # con los cambios ya en main y las Actions en verde:
-git tag -a 0.2.1 -m "0.2.1"
-git push origin 0.2.1
+git tag -a 0.2.2 -m "0.2.2"
+git push origin 0.2.2
 ```
 
-Después, en GitHub ve a **Releases → Draft a new release**, elige el tag `0.2.1`, pon como título `0.2.1`, pega las notas del CHANGELOG y pulsa **Publish release**. Debe ser una release completa: no basta con el tag.
+Después, en GitHub ve a **Releases → Draft a new release**, elige el tag `0.2.2`, pon como título `0.2.2`, pega las notas del CHANGELOG y pulsa **Publish release**. Debe ser una release completa: no basta con el tag.
 
 ## 6. Pull Request a `hacs/default`
 
@@ -99,10 +99,16 @@ Después, en GitHub ve a **Releases → Draft a new release**, elige el tag `0.2
 Adds new integration [aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine]
 ```
 
-**Descripción (plantilla de `hacs/default`):**
+**Descripción:** es la plantilla oficial de `hacs/default`, copiada literalmente. Incluye los comentarios HTML y el marcador final `<!-- tid:… -->`, que no debes borrar porque el bot de HACS parece usarlo para etiquetar la PR.
 
 ```markdown
+<!--
+DO NOT REQUEST REVIEWS, THAT IS JUST RUDE, IF YOU DO THE PULL REQUEST WILL BE CLOSED!
+Make sure to check out the guide here: https://hacs.xyz/docs/publish/start
+-->
 ## Checklist
+
+<!-- Do not open a pull request before you have completed all these, it will be closed. -->
 
 - [x] I've read the [publishing documentation](https://hacs.xyz/docs/publish/start).
 - [x] I've added the [HACS action](https://hacs.xyz/docs/publish/action) to my repository.
@@ -113,9 +119,13 @@ Adds new integration [aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-
 
 ## Links
 
-Link to current release: https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/releases/tag/0.2.1
-Link to successful HACS action (without the `ignore` key): https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/actions/runs/<RUN_ID>
-Link to successful hassfest action (if integration): https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/actions/runs/<RUN_ID>
+<!-- Do not open a pull request before you have provided all these, it will be closed. -->
+
+Link to current release: https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/releases/tag/0.2.2
+Link to successful HACS action (without the `ignore` key): https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/actions/runs/44149512462
+Link to successful hassfest action (if integration): https://github.com/aalexcoding/haier-smartair2-cloud-for-homeassistant-leroy-machine/actions/runs/44149512488
+
+<!-- tid:73253df5-5376-4e68-8c16-b234da6a2de3 -->
 ```
 
 Marca cada casilla solo cuando se haya cumplido de verdad. HACS cierra sin aviso las PR con la plantilla mal rellenada.

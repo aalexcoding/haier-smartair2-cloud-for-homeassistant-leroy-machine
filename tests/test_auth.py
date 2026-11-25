@@ -5,6 +5,7 @@ import asyncio
 import importlib.util
 from pathlib import Path
 import sys
+import time
 import types
 from unittest.mock import AsyncMock, Mock
 
@@ -88,8 +89,8 @@ class FakeLoop:
     def __init__(self):
         self.timers = []
 
-    def call_later(self, delay, callback):
-        timer = Timer(delay, callback)
+    def call_later(self, delay, callback, *args):
+        timer = Timer(delay, (lambda: callback(*args)) if args else callback)
         self.timers.append(timer)
         return timer
 
@@ -123,6 +124,12 @@ def client(modules, hass, monkeypatch):
     return modules.cloud.HaierCloudClient(hass, "user@example.com", "old", "gateway")
 
 
+async def fire_retry(hass):
+    """Run the most recently scheduled retry callback to completion."""
+    hass.loop.timers[-1].callback()
+    await hass.tasks[-1]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reason", ["disconnect", "token refresh", "invalidToken", "retry"])
 async def test_auth_failure_starts_reauth_once_and_never_retries(modules, client, hass, monkeypatch, reason):
@@ -138,6 +145,14 @@ async def test_auth_failure_starts_reauth_once_and_never_retries(modules, client
 
     await client._reconnect(reason)
     assert refresh.cancelled
+    # One rejection may be a rate limit or maintenance: retry with back-off.
+    assert [t.delay for t in hass.loop.timers[1:]] == [30]
+    entry.async_start_reauth.assert_not_called()
+    await fire_retry(hass)
+    entry.async_start_reauth.assert_not_called()
+    await fire_retry(hass)
+
+    assert login.await_count == modules.cloud._AUTH_REJECTIONS_BEFORE_REAUTH
     assert client._refresh_unsub is None
     assert client._retry_unsub is None
     assert not client.is_online("DEVICE")
@@ -145,19 +160,34 @@ async def test_auth_failure_starts_reauth_once_and_never_retries(modules, client
     entry.async_start_reauth.assert_called_once_with(hass)
 
     # Even stale queued callbacks and direct reconnect calls cannot log in again.
+    timers = len(hass.loop.timers)
     refresh.callback()
     client._on_disconnect(None, None, None, 1)
     client._on_message(None, None, types.SimpleNamespace(topic="topic", payload=b'{"event":"invalidToken"}'))
     await asyncio.gather(*hass.tasks)
     await client._reconnect("disconnect")
     client._schedule_refresh()
-    assert len(hass.loop.timers) == 1
-    login.assert_awaited_once()
+    client._schedule_watchdog()
+    assert len(hass.loop.timers) == timers
+    assert login.await_count == modules.cloud._AUTH_REJECTIONS_BEFORE_REAUTH
     entry.async_start_reauth.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_network_backoff_caps_resets_and_cannot_be_bypassed(modules, client, hass, monkeypatch):
+async def test_successful_login_resets_transient_rejections(modules, client, hass, monkeypatch):
+    client._on_auth_failed = Mock()
+    connect = AsyncMock(side_effect=[modules.cloud.CloudAuthError(), modules.cloud.CloudAuthError(), None])
+    monkeypatch.setattr(client, "_connect", connect)
+    await client._reconnect("disconnect")
+    await fire_retry(hass)
+    client._auth_rejections = 0  # what a successful async_login does
+    await fire_retry(hass)
+    assert not client._auth_failed
+    client._on_auth_failed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_network_backoff_caps_and_resets_only_when_session_works(modules, client, hass, monkeypatch):
     connect = AsyncMock(side_effect=OSError("network down"))
     monkeypatch.setattr(client, "_connect", connect)
     client._schedule_refresh()
@@ -168,7 +198,7 @@ async def test_network_backoff_caps_resets_and_cannot_be_bypassed(modules, clien
     for count, delay in enumerate([30, 60, 120, 240, 300, 300], start=1):
         timer = hass.loop.timers[-1]
         assert timer.delay == delay
-        await client._reconnect("invalidToken")
+        await client._reconnect("invalidToken")  # cannot bypass a pending retry
         assert connect.await_count == count
         timer.callback()
         if count == 6:
@@ -177,24 +207,29 @@ async def test_network_backoff_caps_resets_and_cannot_be_bypassed(modules, clien
 
     assert client._retry_unsub is None
     assert hass.loop.timers[-1].delay == modules.cloud.TOKEN_REFRESH_SECONDS
-    connect.side_effect = OSError("network down again")
-    await client._reconnect("disconnect")
-    assert hass.loop.timers[-1].delay == 30
+    # Opening a socket is not enough: a broker that refuses us keeps backing off.
+    assert client._retry_delay == 300
+
+    session = types.SimpleNamespace(is_connected=lambda: True)
+    client._client = session
+    client._set_session_ready(session)
+    assert client._retry_delay == 30
 
 
 @pytest.mark.asyncio
 async def test_auth_failure_after_network_retry_cancels_all_future_work(modules, client, hass, monkeypatch):
     client._on_auth_failed = Mock()
-    connect = AsyncMock(side_effect=[OSError(), modules.cloud.CloudAuthError()])
+    auth = modules.cloud.CloudAuthError
+    connect = AsyncMock(side_effect=[OSError(), auth(), auth(), auth()])
     monkeypatch.setattr(client, "_connect", connect)
     await client._reconnect("disconnect")
-    hass.loop.timers[-1].callback()
-    await hass.tasks[-1]
+    for _ in range(3):
+        await fire_retry(hass)
     assert client._auth_failed
     assert client._retry_unsub is None
     assert client._refresh_unsub is None
     await client._reconnect("token refresh")
-    assert connect.await_count == 2
+    assert connect.await_count == 4
     client._on_auth_failed.assert_called_once()
 
 
@@ -337,3 +372,220 @@ async def test_setup_auth_failure_cleans_up_already_started_local_clients(module
     local.async_start.assert_awaited_once()
     local.async_stop.assert_awaited_once()
     cloud.async_stop.assert_awaited_once()
+
+
+class FakeMqtt:
+    def __init__(self, connected=False):
+        self.connected = connected
+        self.loop_stop = Mock()
+        self.disconnect = Mock()
+
+    def is_connected(self):
+        return self.connected
+
+
+def ready_session(client, connected=True):
+    session = FakeMqtt(connected)
+    client._client = session
+    client._token = "token"
+    client._set_session_ready(session)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_watchdog_reconnects_after_lost_disconnect_callback(modules, client, hass, monkeypatch):
+    # Session died but on_disconnect never reached us: nothing is repairing it.
+    client._client = FakeMqtt(connected=False)
+    client._token = "token"
+    client._connect_started = time.monotonic() - 60
+    reconnect = AsyncMock()
+    monkeypatch.setattr(client, "_reconnect", reconnect)
+    client._schedule_watchdog()
+    hass.loop.timers[-1].callback()
+    await asyncio.gather(*hass.tasks)
+    reconnect.assert_awaited_once_with("watchdog")
+    assert client._watchdog_unsub is hass.loop.timers[-1]
+
+    # Something already repairing it, or a session still inside its grace window.
+    client._reconnecting = True
+    hass.loop.timers[-1].callback()
+    client._reconnecting = False
+    client._retry_unsub = Timer(30, Mock())
+    hass.loop.timers[-1].callback()
+    client._retry_unsub = None
+    client._connect_started = time.monotonic()
+    hass.loop.timers[-1].callback()
+    # A healthy session, an auth failure or a stop must not trigger reconnects.
+    ready_session(client)
+    hass.loop.timers[-1].callback()
+    client._auth_failed = True
+    hass.loop.timers[-1].callback()
+    await asyncio.gather(*hass.tasks)
+    reconnect.assert_awaited_once()
+    assert client._watchdog_unsub is None
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cancels_a_stuck_reconnect(modules, client, hass, monkeypatch):
+    started = asyncio.Event()
+
+    async def hang():
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "_connect", hang)
+    task = asyncio.create_task(client._reconnect("disconnect"))
+    await started.wait()  # asyncio.sleep is mocked by the fixture
+    assert client._reconnecting
+    client._reconnect_started -= modules.cloud._STUCK_RECONNECT_SECONDS + 1
+    client._schedule_watchdog()
+    hass.loop.timers[-1].callback()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+    assert not client._reconnecting
+    assert client._watchdog_unsub is not None  # keeps watching; next tick reconnects
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_discards_half_open_client(modules, client, hass, monkeypatch):
+    half_open = FakeMqtt()
+
+    async def hang():
+        client._client = half_open
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "_connect_unlocked", hang)
+    monkeypatch.setattr(modules.cloud, "_CONNECT_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(TimeoutError):
+        await client._connect()
+    assert client._client is None
+    half_open.loop_stop.assert_called_once()
+    half_open.disconnect.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_command_cancelling_retry_always_starts_reconnect(modules, client, hass, monkeypatch):
+    # The last attempt failed inside connect(): a dead client inside its grace
+    # window and a pending back-off retry. The command must not just wait.
+    client._devices.add("DEVICE")
+    client._client = FakeMqtt(connected=False)
+    client._connect_started = time.monotonic()
+    client._retry_delay = 120
+    pending_retry = client._retry_unsub = Timer(60, Mock())
+
+    async def reconnect(reason):
+        ready_session(client)
+
+    monkeypatch.setattr(client, "_reconnect", AsyncMock(side_effect=reconnect))
+
+    async def let_reconnect_run(_):
+        await asyncio.gather(*hass.tasks)
+
+    monkeypatch.setattr(modules.cloud.asyncio, "sleep", AsyncMock(side_effect=let_reconnect_run))
+    await client._async_ensure_connected("DEVICE")
+    assert pending_retry.cancelled
+    client._reconnect.assert_awaited_once_with("command while disconnected")
+    assert client._retry_delay == 30  # reset by the working session, not by the command
+
+
+@pytest.mark.asyncio
+async def test_commands_cannot_hammer_login(modules, client, hass, monkeypatch):
+    client._devices.add("DEVICE")
+    client._retry_unsub = Timer(60, Mock())
+    client._last_attempt = time.monotonic()
+    monkeypatch.setattr(client, "_reconnect", AsyncMock())
+    monkeypatch.setattr(modules.cloud, "_COMMAND_CONNECT_WAIT_SECONDS", 0)
+    with pytest.raises(RuntimeError, match="not connected"):
+        await client._async_ensure_connected("DEVICE")
+    client._reconnect.assert_not_called()
+    assert not client._retry_unsub.cancelled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state, message", [("auth_failed", "reauthenticate"), ("stopped", "stopped")])
+async def test_command_on_unusable_client_fails_at_once(client, state, message):
+    client._devices.add("DEVICE")
+    setattr(client, f"_{state}", True)
+    with pytest.raises(RuntimeError, match=message):
+        await client._async_ensure_connected("DEVICE")
+
+
+def test_session_ready_only_after_our_suback(modules, client, hass):
+    session = FakeMqtt(connected=True)
+    client._client = session
+    client._token = "token"
+    client._sub_mid = 7
+    assert not client._is_connected()  # CONNACK alone is not enough
+    client._on_subscribe(session, None, 8, [], None)
+    assert not client._is_connected()
+    client._on_subscribe(session, None, 7, [types.SimpleNamespace(is_failure=True)], None)
+    assert not client._is_connected()
+    client._on_subscribe(session, None, 7, [types.SimpleNamespace(is_failure=False)], None)
+    assert client._is_connected()
+
+
+def test_missing_suback_falls_back_to_ready(client, hass):
+    session = FakeMqtt(connected=True)
+    client._client = session
+    client._token = "token"
+    client._arm_suback_fallback(session)
+    hass.loop.timers[-1].callback()
+    assert client._is_connected()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_handling(client, hass, monkeypatch):
+    reconnect = AsyncMock()
+    monkeypatch.setattr(client, "_reconnect", reconnect)
+    # A stale client we already replaced is ignored.
+    ready_session(client)
+    client._handle_disconnect(FakeMqtt())
+    assert client._is_connected()
+    # A working session that drops reconnects at once.
+    client._handle_disconnect(client._client)
+    await asyncio.gather(*hass.tasks)
+    reconnect.assert_awaited_once_with("disconnect")
+    # A session refused or dropped before it ever worked backs off instead.
+    client._handle_disconnect(client._client)
+    reconnect.assert_awaited_once()
+    assert client._retry_unsub is not None and client._retry_unsub.delay == 30
+
+
+def test_availability_survives_short_outages_only(client, hass):
+    client._online["DEVICE"] = True
+    listener = Mock()
+    client.add_listener(listener)
+    ready_session(client)
+    client._mark_disconnected()
+    assert client.is_online("DEVICE")  # e.g. the token-refresh reconnect
+    client._disconnected_since -= 61
+    assert not client.is_online("DEVICE")
+    listener.reset_mock()
+    hass.loop.timers[-1].callback()  # grace expiry pushes the new availability
+    listener.assert_called_once()
+    ready_session(client)
+    assert client.is_online("DEVICE")
+
+
+@pytest.mark.parametrize("payload", [
+    b'{"type":"boundDevs","data":"WzEsMl0="}',              # base64 of [1,2]
+    b'{"type":"boundDevs","data":"eyJkZXZzIjpbMSwieCJdfQ=="}',  # {"devs":[1,"x"]}
+    b'{"type":"boundDevs","data":"eyJkZXZzIjoiYWJjIn0="}',  # {"devs":"abc"}
+])
+def test_malformed_messages_cannot_kill_the_network_thread(client, payload):
+    client._on_message(None, None, types.SimpleNamespace(topic="Client/x/Business/Down", payload=payload))
+
+    class BadTopic:
+        payload = b"{}"
+
+        @property
+        def topic(self):
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "bad")
+
+    client._on_message(None, None, BadTopic())
+
+
+def test_gateway_discovery_eof_does_not_spin(modules):
+    sock = types.SimpleNamespace(recv=Mock(return_value=b""))
+    with pytest.raises(ConnectionError):
+        modules.cloud._recv_or_raise(sock)
